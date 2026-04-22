@@ -1,17 +1,18 @@
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from mistralai.client import Mistral
 
 # --- CONFIGURACIÓN ---
 TWELVE_DATA_API_KEY = "62149b43b7954bc8a3109a9eff9f01f4"
 MISTRAL_API_KEY = "NNXFGfoEWQzEu5pXjZ2iNngw6mZ8vhhg"
+NEWS_API_KEY = "8f4b301015fe430b935bca3b6af0e720" # <--- Agregá tu clave aquí
 
 client = Mistral(api_key=MISTRAL_API_KEY, timeout_ms=120000)
 session = requests.Session()
 
 def get_detailed_stock_data(symbol: str):
-    """Extrae datos financieros y desarrollo de noticias."""
+    """Extrae datos financieros y cotizaciones de Twelve Data."""
     base_url = "https://api.twelvedata.com"
     params = {"symbol": symbol, "apikey": TWELVE_DATA_API_KEY}
     
@@ -23,17 +24,6 @@ def get_detailed_stock_data(symbol: str):
         ts_params = {**params, "interval": "1day", "outputsize": "5"}
         ts = session.get(f"{base_url}/time_series", params=ts_params, timeout=10).json()
         
-        # 3. Noticias con desarrollo (traemos más info)
-        news_data = session.get(f"{base_url}/press_releases", params=params, timeout=15).json()
-        # Capturamos título y descripción para dar más contexto
-        news = []
-        for n in news_data.get("press_releases", [])[:3]:
-            news.append({
-                "titulo": n.get("title"),
-                "fecha": n.get("date"),
-                "resumen": n.get("description", "Sin descripción disponible.")
-            })
-
         return {
             "info_mercado": {
                 "empresa": quote.get("name"),
@@ -42,50 +32,94 @@ def get_detailed_stock_data(symbol: str):
                 "cambio": quote.get("percent_change"),
                 "rango_dia": f"{quote.get('low')} - {quote.get('high')}"
             },
-            "historico_precios": [v.get("close") for v in ts.get("values", [])],
-            "noticias_detalladas": news
+            "historico_precios": [v.get("close") for v in ts.get("values", [])]
         }
     except Exception as e:
-        return {"error": f"Fallo en la extracción de datos: {str(e)}"}
+        return {"error": f"Fallo en datos bursátiles: {str(e)}"}
 
-tools = [{
-    "type": "function",
-    "function": {
-        "name": "get_detailed_stock_data",
-        "description": "Obtiene información financiera y noticias de un activo a partir de su ticker.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "symbol": {"type": "string", "description": "El ticker del activo (ej: MSFT, AAPL, BTC/USD)"}
-            },
-            "required": ["symbol"]
+def get_global_news(query: str):
+    """Busca noticias globales usando NewsAPI (v2/everything)."""
+    url = "https://newsapi.org/v2/everything"
+    # Buscamos noticias de los últimos 7 días para mayor relevancia
+    from_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    
+    params = {
+        "q": query,
+        "from": from_date,
+        "sortBy": "relevancy",
+        "language": "es", # Podés cambiar a 'en' para más volumen de noticias
+        "apiKey": NEWS_API_KEY,
+        "pageSize": 5
+    }
+    
+    try:
+        response = session.get(url, params=params, timeout=15).json()
+        articles = response.get("articles", [])
+        
+        results = []
+        for art in articles:
+            results.append({
+                "fuente": art.get("source", {}).get("name"),
+                "titulo": art.get("title"),
+                "descripcion": art.get("description"),
+                "contenido": art.get("content")[:200] + "..." # Fragmento
+            })
+        return {"noticias_globales": results}
+    except Exception as e:
+        return {"error": f"Fallo en NewsAPI: {str(e)}"}
+
+# --- DEFINICIÓN DE HERRAMIENTAS ---
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_detailed_stock_data",
+            "description": "Obtiene información técnica, precios y tendencia de un activo financiero.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "El ticker del activo (ej: MSFT, AAPL, BTC/USD)"}
+                },
+                "required": ["symbol"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_global_news",
+            "description": "Busca noticias mundiales sobre una empresa, industria o evento económico.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Palabra clave o nombre de empresa para buscar noticias."}
+                },
+                "required": ["query"]
+            }
         }
     }
-}]
+]
 
 def run_agent(user_input):
-    # Obtener fecha de hoy
     fecha_actual = datetime.now().strftime("%d de %B de %Y")
     
     system_instruction = f"""
     Hoy es {fecha_actual}. 
-    Sos un Analista Senior. Tu tarea es:
-    1. Identificar si el usuario menciona una empresa o activo.
-    2. Usar 'get_detailed_stock_data' para obtener la info técnica.
-    3. Redactar un informe ejecutivo extenso y profesional en Markdown.
+    Sos un Analista Senior de Inversiones. Tu tarea es:
+    1. Usar 'get_detailed_stock_data' para los números técnicos.
+    2. Usar 'get_global_news' para entender el contexto macro y noticias recientes.
+    3. Redactar un informe ejecutivo extenso en Markdown.
     
-    Para las noticias: No te limites a listarlas. Analizá cómo el contenido de la noticia 
-    (resumen proporcionado) podría impactar en la confianza del inversor o en el precio.
+    Analizá el cruce entre los datos de precio y las noticias. ¿La noticia justifica la caída/subida? 
+    ¿Hay un riesgo sistémico mencionado en la prensa?
     
-    Formato del informe:
-    # 📈 Informe Ejecutivo: [Empresa]
-    **Fecha de análisis:** {fecha_actual}
+    Formato:
+    # 📈 Informe de Inteligencia: [Activo]
     ---
-    ## 1. Situación de Mercado
-    ## 2. Comportamiento Reciente (Tendencia)
-    ## 3. Análisis de Noticias y Eventos Clave
-    (Aquí desarrollá cada noticia con su impacto potencial)
-    ## 4. Perspectiva y Conclusión
+    ## 1. Métricas de Mercado
+    ## 2. Análisis de Sentimiento (Noticias Globales)
+    ## 3. Correlación Precio-Noticia
+    ## 4. Conclusión y Recomendación
     """
 
     messages = [
@@ -94,6 +128,7 @@ def run_agent(user_input):
     ]
 
     try:
+        # Primera llamada para que el modelo decida qué herramientas usar
         response = client.chat.complete(
             model="mistral-medium-latest",
             messages=messages,
@@ -105,29 +140,35 @@ def run_agent(user_input):
         if msg.tool_calls:
             messages.append(msg)
             for tool_call in msg.tool_calls:
+                func_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
-                print(f"[*] Detectado activo: {args['symbol']}. Procesando informe...")
                 
-                data = get_detailed_stock_data(args['symbol'])
+                print(f"[*] Ejecutando: {func_name} con {args}...")
+                
+                if func_name == "get_detailed_stock_data":
+                    data = get_detailed_stock_data(args['symbol'])
+                elif func_name == "get_global_news":
+                    data = get_global_news(args['query'])
                 
                 messages.append({
                     "role": "tool",
-                    "name": "get_detailed_stock_data",
+                    "name": func_name,
                     "content": json.dumps(data),
                     "tool_call_id": tool_call.id,
                 })
             
+            # Segunda llamada para generar el informe final con todos los datos
             final = client.chat.complete(model="mistral-medium-latest", messages=messages)
             return final.choices[0].message.content
         
         return msg.content
 
     except Exception as e:
-        return f"Ocurrió un error en el sistema: {str(e)}"
+        return f"Error en el sistema: {str(e)}"
 
 if __name__ == "__main__":
-    print("--- Sistema de Inteligencia Financiera ---")
-    user_text = input("¿Qué activo o empresa te gustaría analizar hoy?\n> ")
+    print("--- Sistema de Inteligencia Financiera Avanzado ---")
+    user_text = input("¿Qué activo o sector analizamos? (ej: Nvidia, Bitcoin, Sector Energético)\n> ")
     
     resultado = run_agent(user_text)
     print("\n" + resultado)
